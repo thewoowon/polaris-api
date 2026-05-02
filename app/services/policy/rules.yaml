@@ -1,0 +1,97 @@
+# Polaris policy rules (blueprint §9).
+#
+# Evaluated top-to-bottom. The first rule whose `when` matches wins — the
+# rest are skipped. `when: always` is a catch-all; keep it last.
+#
+# Supported predicates (see yaml_engine.py for the evaluator):
+#   Combinators:
+#     all_of: [<pred>, ...]    # every element must match
+#     any_of: [<pred>, ...]    # at least one must match
+#     not: <pred>              # inverts
+#
+#   Leaf predicates:
+#     category_in: [<cat>, ...]       # classification.categories ∩ list is non-empty
+#     categories_exact: [<cat>, ...]  # classification.categories == set(list)
+#     sentiment: positive|neutral|negative
+#     out_of_distribution: true|false
+#     needs_clarification: true|false
+#     confidence_below: <float>
+#     confidence_at_least: <float>
+#     ambiguity_at_least: <float>
+#     rating_at_most: <int 1-5>
+#     rating_at_least: <int 1-5>
+#     always: true                     # catch-all (or just `when: always`)
+#
+# Hot-reload is NOT supported. Restart uvicorn after editing this file.
+
+version: rules-v1
+
+rules:
+  - id: spam_ignore
+    action: ignore
+    risk: 0.0
+    reasons: [spam]
+    when:
+      category_in: [spam]
+
+  - id: out_of_distribution
+    action: route_to_human
+    risk: 0.6
+    reasons: [ood]
+    when:
+      out_of_distribution: true
+
+  - id: high_risk_category
+    action: draft_reply
+    risk: 0.8
+    reasons: [high_risk_category]
+    when:
+      category_in: [payment, refund, login_account]
+
+  - id: low_confidence
+    action: route_to_human
+    risk: 0.5
+    reasons: [confidence_below_low]
+    when:
+      confidence_below: 0.55
+
+  - id: needs_clarification_or_ambiguous
+    action: request_clarification
+    risk: 0.4
+    reasons: [needs_clarification_or_ambiguous]
+    when:
+      any_of:
+        - ambiguity_at_least: 0.65
+        - needs_clarification: true
+
+  - id: bug_low_rating
+    action: create_issue
+    risk: 0.7
+    reasons: [bug_low_rating]
+    when:
+      all_of:
+        - category_in: [bug]
+        - sentiment: negative
+        - rating_at_most: 2
+
+  - id: praise_high_confidence
+    action: auto_reply
+    risk: 0.1
+    reasons: [praise_high_confidence]
+    when:
+      all_of:
+        - categories_exact: [praise]
+        - confidence_at_least: 0.75
+
+  - id: mid_confidence_draft
+    action: draft_reply
+    risk: 0.3
+    reasons: [confidence_between_low_and_mid]
+    when:
+      confidence_below: 0.75
+
+  - id: default_draft
+    action: draft_reply
+    risk: 0.2
+    reasons: [default_draft]
+    when: always
