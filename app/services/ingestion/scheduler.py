@@ -389,7 +389,7 @@ class IngestionScheduler:
     def status(self) -> dict[str, Any]:
         return {
             "running": self.running,
-            "allowed_sources": list(self.allowed_sources),
+            "sources": sorted(self.allowed_sources),
             "interval_sec": self.interval_sec,
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "last_run_at": self.last_run_at.isoformat() if self.last_run_at else None,
