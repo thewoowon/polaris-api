@@ -1,9 +1,10 @@
+import uuid
 from datetime import datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import DateTime, Enum as SqlEnum, Integer, String, Text, UniqueConstraint, func
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import DateTime, Enum as SqlEnum, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -12,6 +13,7 @@ if TYPE_CHECKING:
     from app.models.classification import ClassificationResult
     from app.models.policy import PolicyDecision
     from app.models.reply import ReplyDraft
+    from app.models.app_profile import AppProfile
 
 
 class ReviewSource(str, Enum):
@@ -45,6 +47,12 @@ class Review(Base):
     extra: Mapped[dict[str, Any]] = mapped_column(
         "metadata", JSONB, nullable=False, default=dict, server_default="{}"
     )
+    app_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("app_profiles.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
 
     classification: Mapped["ClassificationResult | None"] = relationship(
         back_populates="review", uselist=False, cascade="all, delete-orphan"
@@ -55,3 +63,4 @@ class Review(Base):
     reply_draft: Mapped["ReplyDraft | None"] = relationship(
         back_populates="review", uselist=False, cascade="all, delete-orphan"
     )
+    app_profile: Mapped["AppProfile | None"] = relationship(back_populates="reviews")
