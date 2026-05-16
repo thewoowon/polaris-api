@@ -43,6 +43,7 @@ class AppProfile(Base):
     country: Mapped[str] = mapped_column(String(8), nullable=False, server_default="kr")
     is_target: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     is_competitor: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    ingestion_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
 
     company: Mapped["Company"] = relationship(back_populates="apps")
     reviews: Mapped[list["Review"]] = relationship(back_populates="app_profile")

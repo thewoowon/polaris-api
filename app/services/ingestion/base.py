@@ -1,3 +1,4 @@
+import uuid
 from typing import Any, Protocol
 
 from pydantic import BaseModel, Field
@@ -17,6 +18,7 @@ class IngestionItem(BaseModel):
     author_name: str | None = None
     raw_text: str
     extra: dict[str, Any] = Field(default_factory=dict)
+    app_id: uuid.UUID | None = None
 
 
 class ReviewSourceProto(Protocol):

@@ -8,7 +8,7 @@ or durable queues matter, swap to Arq/RQ/Celery behind the same
 Caveats:
 - With uvicorn --workers N, each worker owns its own scheduler instance
   and would duplicate ingestion. Run the scheduler only in one worker
-  (e.g. pin via INGESTION_ENABLED on a dedicated worker) for real deploys.
+  (e.g. set INGESTION_ENABLED on a dedicated worker) for real deploys.
 - When auto-pipeline is on, each new review commits in two stages: the
   review itself (always persisted) and then classification + policy in a
   separate transaction (rolls back if the LLM call errors, leaving the
@@ -19,18 +19,20 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.models.app_profile import AppProfile
 from app.models.classification import ClassificationResult
 from app.models.policy import PolicyDecision
 from app.models.review import Review
 from app.services.audit.logger import AuditLogger
 from app.services.classification.base import Classifier
-from app.services.ingestion.base import ReviewSourceProto
+from app.services.ingestion.base import IngestionItem, ReviewSourceProto
 from app.services.normalization import normalize_text
 from app.services.policy.base import PolicyEngine
 
@@ -42,17 +44,25 @@ class IngestionScheduler:
     def __init__(
         self,
         *,
-        sources: list[ReviewSourceProto],
+        allowed_sources: list[str],
         interval_sec: int,
         session_factory: async_sessionmaker[AsyncSession],
         classifier: Classifier | None = None,
         policy_engine: PolicyEngine | None = None,
+        gp_lang: str = "ko",
+        gp_country: str = "kr",
+        gp_count: int = 20,
+        as_country: str = "kr",
     ):
-        self.sources = sources
+        self.allowed_sources = {s.strip().lower() for s in allowed_sources}
         self.interval_sec = interval_sec
         self.session_factory = session_factory
         self.classifier = classifier
         self.policy_engine = policy_engine
+        self.gp_lang = gp_lang
+        self.gp_country = gp_country
+        self.gp_count = gp_count
+        self.as_country = as_country
 
         self._task: asyncio.Task | None = None
         self._stop_event: asyncio.Event = asyncio.Event()
@@ -81,8 +91,8 @@ class IngestionScheduler:
         self.started_at = datetime.now(timezone.utc)
         self._task = asyncio.create_task(self._loop(), name="ingestion-scheduler")
         logger.info(
-            "ingestion scheduler started; sources=%s interval=%ds auto_pipeline=%s",
-            [s.name for s in self.sources],
+            "ingestion scheduler started; allowed_sources=%s interval=%ds auto_pipeline=%s",
+            self.allowed_sources,
             self.interval_sec,
             self.auto_pipeline_enabled,
         )
@@ -98,15 +108,53 @@ class IngestionScheduler:
         self._task = None
         logger.info("ingestion scheduler stopped")
 
+    # ─── dynamic source building ─────────────────────────────────────
+
+    async def _load_sources_from_db(
+        self, db: AsyncSession
+    ) -> list[tuple[ReviewSourceProto, uuid.UUID | None]]:
+        """Build (source, app_id) pairs from DB-enabled apps each tick."""
+        sources: list[tuple[ReviewSourceProto, uuid.UUID | None]] = []
+
+        if "synthetic" in self.allowed_sources:
+            from app.services.ingestion.synthetic import SyntheticSource
+            sources.append((SyntheticSource(), None))
+
+        if "google_play" not in self.allowed_sources and "app_store" not in self.allowed_sources:
+            return sources
+
+        result = await db.execute(
+            select(AppProfile).where(AppProfile.ingestion_enabled == True)  # noqa: E712
+        )
+        apps = result.scalars().all()
+
+        for app in apps:
+            if "google_play" in self.allowed_sources and app.play_store_package:
+                from app.services.ingestion.google_play import GooglePlaySource
+                sources.append((
+                    GooglePlaySource(
+                        app_id=app.play_store_package,
+                        lang=self.gp_lang,
+                        country=app.country or self.gp_country,
+                        count=self.gp_count,
+                    ),
+                    app.id,
+                ))
+            if "app_store" in self.allowed_sources and app.app_store_id:
+                from app.services.ingestion.app_store import AppStoreSource
+                sources.append((
+                    AppStoreSource(
+                        app_id=app.app_store_id,
+                        country=app.country or self.as_country,
+                    ),
+                    app.id,
+                ))
+
+        return sources
+
     # ─── single run ──────────────────────────────────────────────────
 
     async def run_once(self) -> dict[str, Any]:
-        """Fetch every source once + persist + optional auto-pipeline.
-
-        Per-review commits isolate failures: a flaky classifier never
-        loses a review, and a flaky source never poisons other sources'
-        inserts.
-        """
         ts = datetime.now(timezone.utc)
         per_source: dict[str, int] = {}
         total = 0
@@ -116,14 +164,21 @@ class IngestionScheduler:
         fetch_errors: list[dict[str, str]] = []
 
         async with self.session_factory() as db:
-            for src in self.sources:
+            sources = await self._load_sources_from_db(db)
+
+            for src, app_id in sources:
                 try:
-                    items = await src.fetch()
+                    raw_items = await src.fetch()
                 except Exception as e:  # noqa: BLE001
                     logger.exception("source %s fetch failed: %s", src.name, e)
                     fetch_errors.append({"source": src.name, "error": str(e)})
                     self.error_count += 1
                     continue
+
+                # Tag items with their app context
+                items = []
+                for item in raw_items:
+                    items.append(item.model_copy(update={"app_id": app_id}))
 
                 if items:
                     new_items, skipped = await self._filter_seen(db, items)
@@ -166,13 +221,6 @@ class IngestionScheduler:
     async def _filter_seen(
         self, db: AsyncSession, items: list
     ) -> tuple[list, int]:
-        """Dedup against existing (source, source_review_id) pairs.
-
-        Items without a source_review_id pass through unchanged (synthetic
-        UUID ids rarely collide; real sources always provide stable ids).
-        Returns (kept_items, skipped_count).
-        """
-        # Group by source so we can do one query per source.
         per_source: dict = {}
         for item in items:
             sid = item.source_review_id
@@ -205,9 +253,8 @@ class IngestionScheduler:
         self,
         db: AsyncSession,
         src_name: str,
-        item,
+        item: IngestionItem,
     ) -> int | None:
-        """Commit a single review + its ingest audit row. Returns review id."""
         try:
             review = Review(
                 source=item.source,
@@ -220,6 +267,7 @@ class IngestionScheduler:
                 raw_text=item.raw_text,
                 normalized_text=normalize_text(item.raw_text),
                 extra=item.extra,
+                app_id=item.app_id,
             )
             db.add(review)
             await db.flush()
@@ -232,6 +280,7 @@ class IngestionScheduler:
                     "source": item.source.value,
                     "source_review_id": item.source_review_id,
                     "via": src_name,
+                    "app_id": str(item.app_id) if item.app_id else None,
                 },
             )
             await db.commit()
@@ -243,7 +292,6 @@ class IngestionScheduler:
             return None
 
     async def _run_pipeline(self, db: AsyncSession, review_id: int) -> bool:
-        """Run classifier + policy for a freshly-ingested review. Returns True on success."""
         assert self.classifier is not None and self.policy_engine is not None
 
         try:
@@ -341,7 +389,7 @@ class IngestionScheduler:
     def status(self) -> dict[str, Any]:
         return {
             "running": self.running,
-            "sources": [s.name for s in self.sources],
+            "allowed_sources": list(self.allowed_sources),
             "interval_sec": self.interval_sec,
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "last_run_at": self.last_run_at.isoformat() if self.last_run_at else None,
@@ -363,19 +411,27 @@ _scheduler: IngestionScheduler | None = None
 
 def init_scheduler(
     *,
-    sources: list[ReviewSourceProto],
+    allowed_sources: list[str],
     interval_sec: int,
     session_factory: async_sessionmaker[AsyncSession],
     classifier: Classifier | None = None,
     policy_engine: PolicyEngine | None = None,
+    gp_lang: str = "ko",
+    gp_country: str = "kr",
+    gp_count: int = 20,
+    as_country: str = "kr",
 ) -> IngestionScheduler:
     global _scheduler
     _scheduler = IngestionScheduler(
-        sources=sources,
+        allowed_sources=allowed_sources,
         interval_sec=interval_sec,
         session_factory=session_factory,
         classifier=classifier,
         policy_engine=policy_engine,
+        gp_lang=gp_lang,
+        gp_country=gp_country,
+        gp_count=gp_count,
+        as_country=as_country,
     )
     return _scheduler
 

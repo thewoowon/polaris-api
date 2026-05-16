@@ -17,6 +17,7 @@ class AppProfileCreate(BaseModel):
     country: str = Field("kr", max_length=8)
     is_target: bool = False
     is_competitor: bool = False
+    ingestion_enabled: bool = False
 
 
 class AppProfileUpdate(BaseModel):
@@ -27,6 +28,7 @@ class AppProfileUpdate(BaseModel):
     category: str | None = None
     is_target: bool | None = None
     is_competitor: bool | None = None
+    ingestion_enabled: bool | None = None
 
 
 class AppProfileResponse(ORMModel):
@@ -40,6 +42,7 @@ class AppProfileResponse(ORMModel):
     country: str
     is_target: bool
     is_competitor: bool
+    ingestion_enabled: bool
     created_at: datetime
     updated_at: datetime
     review_count: int = 0

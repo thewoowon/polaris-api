@@ -65,14 +65,12 @@ class Settings(BaseSettings):
     INGESTION_AUTO_PIPELINE: bool = False
     INGESTION_AUTO_CLASSIFIER: str = "stub"  # stub | openai
 
-    # Google Play source (via google-play-scraper — public pages, no key).
-    INGESTION_GOOGLE_PLAY_APP_ID: str = ""  # e.g. com.kakao.talk
+    # Google Play defaults (app IDs are now stored per-app in app_profiles).
     INGESTION_GOOGLE_PLAY_LANG: str = "ko"
     INGESTION_GOOGLE_PLAY_COUNTRY: str = "kr"
     INGESTION_GOOGLE_PLAY_COUNT: int = 20
 
-    # App Store source (via iTunes RSS — no key, ~50/page).
-    INGESTION_APP_STORE_APP_ID: str = ""  # numeric app id
+    # App Store defaults (app IDs are now stored per-app in app_profiles).
     INGESTION_APP_STORE_COUNTRY: str = "kr"
 
     @property

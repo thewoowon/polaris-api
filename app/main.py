@@ -9,57 +9,12 @@ from app.core.config import settings
 from app.db.session import AsyncSessionLocal
 from app.services.classification.base import Classifier
 from app.services.classification.stub import StubClassifier
-from app.services.ingestion.app_store import AppStoreSource
-from app.services.ingestion.google_play import GooglePlaySource
 from app.services.ingestion.scheduler import init_scheduler
-from app.services.ingestion.synthetic import SyntheticSource
 from app.services.policy.base import PolicyEngine
 from app.services.policy.engine import RuleBasedPolicyEngine
 
 
 logger = logging.getLogger(__name__)
-
-
-def _build_sources() -> list:
-    """Parse INGESTION_SOURCES into concrete source instances.
-
-    Sources missing their required config (e.g. empty app id) are skipped
-    with a warning so the rest of the pipeline still starts.
-    """
-    names = [s.strip() for s in settings.INGESTION_SOURCES.split(",") if s.strip()]
-    sources: list = []
-    for name in names:
-        if name == "synthetic":
-            sources.append(SyntheticSource())
-        elif name == "google_play":
-            if not settings.INGESTION_GOOGLE_PLAY_APP_ID:
-                logger.warning(
-                    "google_play source requested but INGESTION_GOOGLE_PLAY_APP_ID is empty — skipping"
-                )
-                continue
-            sources.append(
-                GooglePlaySource(
-                    app_id=settings.INGESTION_GOOGLE_PLAY_APP_ID,
-                    lang=settings.INGESTION_GOOGLE_PLAY_LANG,
-                    country=settings.INGESTION_GOOGLE_PLAY_COUNTRY,
-                    count=settings.INGESTION_GOOGLE_PLAY_COUNT,
-                )
-            )
-        elif name == "app_store":
-            if not settings.INGESTION_APP_STORE_APP_ID:
-                logger.warning(
-                    "app_store source requested but INGESTION_APP_STORE_APP_ID is empty — skipping"
-                )
-                continue
-            sources.append(
-                AppStoreSource(
-                    app_id=settings.INGESTION_APP_STORE_APP_ID,
-                    country=settings.INGESTION_APP_STORE_COUNTRY,
-                )
-            )
-        else:
-            logger.warning("unknown ingestion source %r; skipping", name)
-    return sources
 
 
 def _build_auto_classifier() -> Classifier | None:
@@ -97,14 +52,17 @@ async def lifespan(app: FastAPI):
         classifier = _build_auto_classifier()
         policy_engine = RuleBasedPolicyEngine()
 
-    # Scheduler is always initialised so POST /ingestion/run stays usable
-    # regardless of INGESTION_ENABLED (manual trigger path).
+    allowed = [s.strip() for s in settings.INGESTION_SOURCES.split(",") if s.strip()]
     scheduler = init_scheduler(
-        sources=_build_sources(),
+        allowed_sources=allowed,
         interval_sec=settings.INGESTION_INTERVAL_SEC,
         session_factory=AsyncSessionLocal,
         classifier=classifier,
         policy_engine=policy_engine,
+        gp_lang=settings.INGESTION_GOOGLE_PLAY_LANG,
+        gp_country=settings.INGESTION_GOOGLE_PLAY_COUNTRY,
+        gp_count=settings.INGESTION_GOOGLE_PLAY_COUNT,
+        as_country=settings.INGESTION_APP_STORE_COUNTRY,
     )
     if settings.INGESTION_ENABLED:
         await scheduler.start()
